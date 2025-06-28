@@ -6,8 +6,8 @@ import uuid
 import urllib.parse
 import redis
 import os
-import redis
 
+# Railway-compatible Redis connection
 redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
 redis_client = redis.from_url(redis_url, decode_responses=True)
 
@@ -15,7 +15,13 @@ class GameServerHandler(http.server.BaseHTTPRequestHandler):
     def _set_headers(self, status=200):
         self.send_response(status)
         self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
+
+    def do_OPTIONS(self):
+        self._set_headers()
 
     def do_POST(self):
         length = int(self.headers.get('Content-Length', 0))
@@ -145,6 +151,18 @@ class GameServerHandler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = urllib.parse.parse_qs(parsed.query)
+        
+        # Healthcheck endpoint untuk Railway
+        if path == '/' or path == '/health':
+            self._set_headers()
+            response = {
+                'status': 'ok', 
+                'service': 'Connect Four Game Server',
+                'timestamp': str(uuid.uuid4())[:8]
+            }
+            self.wfile.write(json.dumps(response).encode())
+            return
+            
         if path == '/lobby_status':
             room_id = query.get('room_id', [None])[0]
             room = get_room(room_id)
@@ -170,13 +188,19 @@ class GameServerHandler(http.server.BaseHTTPRequestHandler):
 def get_room(room_id):
     if not room_id:
         return None
-    data = redis_client.get(f'room:{room_id}')
-    if data:
-        return json.loads(data)
+    try:
+        data = redis_client.get(f'room:{room_id}')
+        if data:
+            return json.loads(data)
+    except Exception as e:
+        print(f"Redis error: {e}")
     return None
 
 def save_room(room_id, room):
-    redis_client.set(f'room:{room_id}', json.dumps(room))
+    try:
+        redis_client.set(f'room:{room_id}', json.dumps(room))
+    except Exception as e:
+        print(f"Redis save error: {e}")
 
 def check_win(board, row, col, player):
     def count(dx, dy):
@@ -199,6 +223,17 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--port', type=int, default=int(os.getenv('PORT', 5001)))
     args = parser.parse_args()
+    
+    print(f"Starting Connect Four Game Server on port {args.port}")
+    print(f"Redis URL: {redis_url}")
+    
+    # Test Redis connection
+    try:
+        redis_client.ping()
+        print("Redis connection successful")
+    except Exception as e:
+        print(f"Redis connection failed: {e}")
+    
     with socketserver.ThreadingTCPServer(("", args.port), GameServerHandler) as httpd:
-        print(f"Serving on port {args.port}")
+        print(f"Server ready! Healthcheck available at /{args.port}")
         httpd.serve_forever()
